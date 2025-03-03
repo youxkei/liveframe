@@ -20,20 +20,6 @@ func IsLiveStreaming(ctx context.Context, client *http.Client, checkInterval tim
 		log.Fatalf("Error creating YouTube service: %v", err)
 	}
 
-	// Get the authenticated user's channel ID
-	var channelID string
-	channelsResponse, err := youtubeService.Channels.List([]string{"id"}).Mine(true).Do()
-	if err != nil {
-		log.Fatalf("Error getting channel ID: %v", err)
-	}
-
-	if len(channelsResponse.Items) == 0 {
-		log.Fatalf("Could not find authenticated user's channel")
-	}
-
-	channelID = channelsResponse.Items[0].Id
-	log.Printf("Found channel ID: %s", channelID)
-
 	// Start goroutine to check streaming status periodically
 	go func() {
 		ticker := time.NewTicker(checkInterval)
@@ -43,11 +29,7 @@ func IsLiveStreaming(ctx context.Context, client *http.Client, checkInterval tim
 			select {
 			case <-ticker.C:
 				// Check for live broadcasts
-				searchResponse, err := youtubeService.Search.List([]string{"id", "snippet"}).
-					ChannelId(channelID).
-					EventType("live").
-					Type("video").
-					Do()
+				searchResponse, err := youtubeService.LiveBroadcasts.List([]string{"snippet", "id"}).BroadcastStatus("active").Do()
 
 				if err != nil {
 					log.Printf("Error checking live broadcasts: %v", err)

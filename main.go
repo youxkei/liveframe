@@ -51,7 +51,7 @@ func main() {
 
 	// Set up streaming status check
 	log.Println("Setting up YouTube streaming status check")
-	statusCh := IsLiveStreaming(ctx, client, 30*time.Second)
+	statusCh := IsLiveStreaming(ctx, client, 5*time.Second)
 
 	// Handle streaming status updates
 	go func() {
