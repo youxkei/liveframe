@@ -12,7 +12,8 @@ import (
 
 // IsLiveStreaming checks if the user is currently live streaming on YouTube
 func IsLiveStreaming(ctx context.Context, client *http.Client, checkInterval time.Duration) chan bool {
-	statusCh := make(chan bool)
+	// Use a buffered channel to prevent blocking
+	statusCh := make(chan bool, 1)
 
 	// Create YouTube service
 	youtubeService, err := youtube.NewService(ctx, option.WithHTTPClient(client))
@@ -30,8 +31,30 @@ func IsLiveStreaming(ctx context.Context, client *http.Client, checkInterval tim
 
 		// Function to check streaming status and send update
 		checkAndUpdateStatus := func() {
-			// Check for live broadcasts
-			searchResponse, err := youtubeService.LiveBroadcasts.List([]string{"snippet", "id"}).BroadcastStatus("active").Do()
+			// Recover from any panics that might occur during API calls
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("Recovered from panic in YouTube API call: %v", r)
+					// On panic, send the last known status if we've checked before
+					select {
+					case statusCh <- lastKnownStatus:
+						log.Printf("Sent last known status (%v) after recovering from panic", lastKnownStatus)
+					case <-ctx.Done():
+						return
+					default:
+						// Non-blocking - if channel is full, just continue
+					}
+				}
+			}()
+
+			// Check for live broadcasts with timeout context
+			apiCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+
+			searchResponse, err := youtubeService.LiveBroadcasts.List([]string{"snippet", "id"}).
+				BroadcastStatus("active").
+				Context(apiCtx).
+				Do()
 
 			if err != nil {
 				log.Printf("Error checking live broadcasts: %v", err)
@@ -45,6 +68,9 @@ func IsLiveStreaming(ctx context.Context, client *http.Client, checkInterval tim
 				default:
 					// Non-blocking - if channel is full, just continue
 				}
+
+				// Add a small delay before the next check on error
+				time.Sleep(1 * time.Second)
 				return
 			}
 

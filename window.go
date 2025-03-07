@@ -30,8 +30,21 @@ func NewWindowManager(hwnd win.HWND) *WindowManager {
 
 // SetVisible sets the window visibility
 func (wm *WindowManager) SetVisible(visible bool) {
+	// Add recovery mechanism
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("Recovered from panic in SetVisible: %v", r)
+		}
+	}()
+
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
+
+	// Check if window handle is valid
+	if wm.hwnd == 0 {
+		log.Println("Warning: Invalid window handle in SetVisible")
+		return
+	}
 
 	if visible {
 		win.ShowWindow(wm.hwnd, win.SW_SHOW)
