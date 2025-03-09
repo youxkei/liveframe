@@ -15,6 +15,22 @@ const (
 	borderWidth = 2 // Border width in pixels
 )
 
+var (
+	className  = mustGetUTF16PtrFromString("RedBorderWindow")
+	windowName = mustGetUTF16PtrFromString("LiveFrame - YouTube Streaming Border")
+
+	idcArrow = mustGetUTF16PtrFromString("IDC_ARROW")
+)
+
+func mustGetUTF16PtrFromString(str string) *uint16 {
+	ptr, err := syscall.UTF16PtrFromString(str)
+	if err != nil {
+		panic(fmt.Sprintf("failed to convert string %q to UTF16 pointer", str))
+	}
+
+	return ptr
+}
+
 // WindowManager manages the window visibility
 type WindowManager struct {
 	hwnd win.HWND
@@ -30,12 +46,10 @@ func NewWindowManager(hwnd win.HWND) *WindowManager {
 
 // SetVisible sets the window visibility
 func (wm *WindowManager) SetVisible(visible bool) {
-	// Add recovery mechanism
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Recovered from panic in SetVisible: %v", r)
-		}
-	}()
+	if wm == nil {
+		log.Println("Warning: windowManager is nil, cannot update visibility")
+		return
+	}
 
 	wm.mu.Lock()
 	defer wm.mu.Unlock()
@@ -59,7 +73,7 @@ func (wm *WindowManager) SetVisible(visible bool) {
 // CreateBorderWindow creates the border window that will be shown during streaming
 func CreateBorderWindow(ctx context.Context) (win.HWND, *WindowManager, error) {
 	// Register window class
-	className := "RedBorderWindow"
+
 	hInstance := win.GetModuleHandle(nil)
 
 	var icex win.INITCOMMONCONTROLSEX
@@ -72,9 +86,9 @@ func CreateBorderWindow(ctx context.Context) (win.HWND, *WindowManager, error) {
 		Style:         win.CS_HREDRAW | win.CS_VREDRAW,
 		LpfnWndProc:   syscall.NewCallback(wndProc),
 		HInstance:     hInstance,
-		HCursor:       win.LoadCursor(0, syscall.StringToUTF16Ptr("IDC_ARROW")),
+		HCursor:       win.LoadCursor(0, idcArrow),
 		HbrBackground: win.HBRUSH(win.GetStockObject(win.BLACK_BRUSH)),
-		LpszClassName: syscall.StringToUTF16Ptr(className),
+		LpszClassName: className,
 	}
 
 	if atom := win.RegisterClassEx(&wcex); atom == 0 {
@@ -85,11 +99,10 @@ func CreateBorderWindow(ctx context.Context) (win.HWND, *WindowManager, error) {
 	screenWidth := int32(win.GetSystemMetrics(win.SM_CXSCREEN))
 	screenHeight := int32(win.GetSystemMetrics(win.SM_CYSCREEN))
 
-	// Create window
 	hwnd := win.CreateWindowEx(
 		WS_EX_LAYERED|WS_EX_TOPMOST|WS_EX_NOACTIVATE,
-		syscall.StringToUTF16Ptr(className),
-		syscall.StringToUTF16Ptr("LiveFrame - YouTube Streaming Border"),
+		className,
+		windowName,
 		win.WS_POPUP,
 		0, 0, screenWidth, screenHeight,
 		0, 0, hInstance, nil,
@@ -114,6 +127,8 @@ func CreateBorderWindow(ctx context.Context) (win.HWND, *WindowManager, error) {
 	// Clean up when context is done
 	go func() {
 		<-ctx.Done()
+
+		log.Printf("destroying window due to context cancel")
 		win.DestroyWindow(hwnd)
 	}()
 

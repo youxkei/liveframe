@@ -55,17 +55,6 @@ func main() {
 
 	// Handle streaming status updates with recovery mechanism
 	go func() {
-		// Add recovery for panics in the status handler
-		defer func() {
-			if r := recover(); r != nil {
-				log.Printf("Recovered from panic in status handler: %v", r)
-				// Try to hide the window on panic
-				if windowManager != nil {
-					windowManager.SetVisible(false)
-				}
-			}
-		}()
-
 		for {
 			select {
 			case isLive, ok := <-statusCh:
@@ -77,13 +66,7 @@ func main() {
 
 				// Log status change
 				log.Printf("Received streaming status update: isLive=%v", isLive)
-
-				// Update window visibility with error handling
-				if windowManager != nil {
-					windowManager.SetVisible(isLive)
-				} else {
-					log.Println("Warning: windowManager is nil, cannot update visibility")
-				}
+				windowManager.SetVisible(isLive)
 
 			case <-ctx.Done():
 				log.Println("Context done, exiting status handler")
@@ -93,6 +76,8 @@ func main() {
 			case <-time.After(30 * time.Second):
 				// This is just a safety check to ensure the select doesn't block forever
 				// if both the channel and context somehow get stuck
+				log.Println("keep alive for stream status check")
+
 				continue
 			}
 		}
@@ -100,19 +85,6 @@ func main() {
 
 	// Message loop - runs until WM_QUIT is received
 	var msg win.MSG
-
-	// Create a ticker for regular context checks
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-
-	// Add a recovery mechanism for the main loop
-	defer func() {
-		if r := recover(); r != nil {
-			log.Printf("Recovered from panic in main loop: %v", r)
-			// Try to clean up and exit gracefully
-			win.PostQuitMessage(0)
-		}
-	}()
 
 	// Main event loop
 	for {
@@ -122,10 +94,6 @@ func main() {
 			log.Println("Context canceled, exiting...")
 			win.PostQuitMessage(0)
 			return
-
-		case <-ticker.C:
-			// Regular check to ensure we're still responsive
-			continue
 
 		default:
 			// Process Windows messages using PeekMessage
