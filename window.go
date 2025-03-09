@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	borderWidth = 2 // Border width in pixels
+	borderWidth = 3 // Border width in pixels
 )
 
 var (
