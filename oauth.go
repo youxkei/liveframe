@@ -80,19 +80,26 @@ func SaveToken(path string, token *oauth2.Token) error {
 }
 
 // GetOAuthClient creates an HTTP server for OAuth flow and returns authorized client
-func GetOAuthClient(ctx context.Context, config *oauth2.Config) (*http.Client, error) {
+// If forceAuth is true, it will start a new OAuth flow regardless of existing token
+func GetOAuthClient(ctx context.Context, config *oauth2.Config, forceAuth bool) (*http.Client, error) {
 	// Try to load token from file
 	tokenPath, err := TokenFile()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get token file path: %w", err)
 	}
 
-	tok, err := TokenFromFile(tokenPath)
-	if err == nil {
-		return config.Client(ctx, tok), nil
+	// If not forcing auth, try to use existing token
+	if !forceAuth {
+		tok, err := TokenFromFile(tokenPath)
+		if err == nil {
+			// Token exists and was loaded successfully
+			return config.Client(ctx, tok), nil
+		}
 	}
 
-	// Token file doesn't exist or is invalid, start OAuth flow
+	// If forceAuth is true or token doesn't exist/is invalid - start OAuth flow
+	log.Println("Starting new OAuth authentication flow")
+	var tok *oauth2.Token
 	codeChan := make(chan string)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -130,8 +137,14 @@ func GetOAuthClient(ctx context.Context, config *oauth2.Config) (*http.Client, e
 		}
 	}()
 
-	// Generate the authorization URL
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
+	// Generate the authorization URL with maximum token lifetime
+	// AccessTypeOffline provides a refresh token
+	// ApprovalForce ensures we get a fresh refresh token by forcing the consent screen
+	authURL := config.AuthCodeURL(
+		"state-token",
+		oauth2.AccessTypeOffline,
+		oauth2.ApprovalForce,
+	)
 
 	// Open the URL in browser
 	log.Printf("Opening browser for OAuth authorization: %s", authURL)

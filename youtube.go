@@ -35,7 +35,6 @@ func IsLiveStreaming(ctx context.Context, client *http.Client, checkInterval tim
 				BroadcastStatus("active").
 				Context(apiCtx).
 				Do()
-
 			if err != nil {
 				log.Printf("Error checking live broadcasts: %v", err)
 

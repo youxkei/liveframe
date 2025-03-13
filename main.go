@@ -35,8 +35,45 @@ func main() {
 		log.Fatalf("Error loading client secret: %v", err)
 	}
 
-	// Get OAuth client
-	client, err := GetOAuthClient(ctx, config)
+	// Get OAuth client with token validation
+	tokenPath, err := TokenFile()
+	if err != nil {
+		log.Fatalf("Failed to get token file path: %v", err)
+	}
+
+	// Check if token exists and is valid
+	needsAuth := true
+	tok, err := TokenFromFile(tokenPath)
+	if err == nil {
+		// Check if token is expired
+		if !tok.Expiry.Before(time.Now()) {
+			// Token is still valid
+			needsAuth = false
+		} else if tok.RefreshToken != "" {
+			// Token is expired but has refresh token, try to refresh
+			log.Println("OAuth token has expired, attempting to refresh")
+			tokenSource := config.TokenSource(ctx, tok)
+			newToken, err := tokenSource.Token()
+			if err == nil {
+				// Successfully refreshed token
+				if err := SaveToken(tokenPath, newToken); err != nil {
+					log.Printf("Warning: Failed to save refreshed token: %v", err)
+				}
+				needsAuth = false
+				tok = newToken
+				log.Println("OAuth token successfully refreshed")
+			} else {
+				log.Printf("Failed to refresh token: %v, will start new OAuth flow", err)
+			}
+		} else {
+			log.Println("OAuth token expired and no refresh token available, will start new OAuth flow")
+		}
+	} else {
+		log.Printf("No existing OAuth token found: %v, will start new OAuth flow", err)
+	}
+
+	// Get OAuth client, which will start a new auth flow if needed
+	client, err := GetOAuthClient(ctx, config, needsAuth)
 	if err != nil {
 		log.Fatalf("Error getting OAuth client: %v", err)
 	}
