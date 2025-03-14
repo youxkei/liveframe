@@ -93,8 +93,10 @@ func main() {
 	// Handle streaming status updates with recovery mechanism
 	go func() {
 		for {
+			log.Println("Receiving status")
 			select {
 			case isLive, ok := <-statusCh:
+				log.Println("Received status")
 				if !ok {
 					log.Println("Status channel closed, exiting status handler")
 					// Channel closed, context is done

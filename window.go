@@ -33,8 +33,9 @@ func mustGetUTF16PtrFromString(str string) *uint16 {
 
 // WindowManager manages the window visibility
 type WindowManager struct {
-	hwnd win.HWND
-	mu   sync.Mutex
+	hwnd    win.HWND
+	mu      sync.Mutex
+	visible bool
 }
 
 // NewWindowManager creates a new window manager
@@ -60,14 +61,26 @@ func (wm *WindowManager) SetVisible(visible bool) {
 		return
 	}
 
-	if visible {
-		win.ShowWindow(wm.hwnd, win.SW_SHOW)
-		win.UpdateWindow(wm.hwnd)
-		log.Println("Window is now visible - YouTube stream detected")
+	if wm.visible != visible {
+		if visible {
+			log.Println("Making window visible")
+
+			win.ShowWindow(wm.hwnd, win.SW_SHOWNA)
+			win.UpdateWindow(wm.hwnd)
+
+			log.Println("Window is now visible - YouTube stream detected")
+		} else {
+			log.Println("Miking window hidden")
+
+			win.ShowWindow(wm.hwnd, win.SW_HIDE)
+
+			log.Println("Window is now hidden - No active YouTube stream")
+		}
 	} else {
-		win.ShowWindow(wm.hwnd, win.SW_HIDE)
-		log.Println("Window is now hidden - No active YouTube stream")
+		log.Println("Window is already in the desired visibility state")
 	}
+
+	wm.visible = visible
 }
 
 // CreateBorderWindow creates the border window that will be shown during streaming
@@ -122,7 +135,6 @@ func CreateBorderWindow(ctx context.Context) (win.HWND, *WindowManager, error) {
 
 	// Create window manager (initially hidden)
 	windowManager := NewWindowManager(hwnd)
-	windowManager.SetVisible(false)
 
 	// Clean up when context is done
 	go func() {
