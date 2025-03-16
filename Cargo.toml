@@ -13,3 +13,4 @@ windows = { version = "0.48", features = [
     "Win32_Graphics_Dwm",
     "Win32_UI_Controls",
 ] }
+ctrlc = "3.4.0"
