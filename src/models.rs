@@ -54,4 +54,5 @@ pub struct OAuthState {
     pub auth_code: Option<String>,
     pub csrf_state: String,
     pub pkce_verifier: Option<PkceCodeVerifier>,
+    pub auth_code_received_tx: Option<tokio::sync::oneshot::Sender<()>>,
 }

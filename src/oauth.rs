@@ -9,14 +9,51 @@ use chrono::Utc;
 use dirs::home_dir;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server, StatusCode};
-use log::{debug, info, warn};
+use log::{debug, error, info, warn};
+use tokio::sync::oneshot;
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
     RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
 };
 use oauth2::basic::BasicClient;
+use windows::core::*;
+use windows::Win32::UI::Shell::ShellExecuteW;
+use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
 
 use crate::models::{ClientSecrets, OAuthState, TokenInfo};
+
+// Maximum number of retries for network operations
+const MAX_RETRIES: u32 = 3;
+// Delay between retries in seconds
+const RETRY_DELAY: u64 = 5;
+
+// Function to open a URL in the default browser
+pub fn open_url_in_browser(url: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
+    info!("Opening URL in browser: {}", url);
+    
+    // Convert the URL to a wide string for Windows API
+    let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    
+    unsafe {
+        // Use ShellExecuteW to open the URL in the default browser
+        let result = ShellExecuteW(
+            None,
+            w!("open"),
+            PCWSTR::from_raw(url_wide.as_ptr()),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOW,
+        );
+        
+        // Check if the operation was successful
+        if result.0 <= 32 {
+            error!("Failed to open URL in browser, error code: {}", result.0);
+            return Err(format!("Failed to open URL in browser, error code: {}", result.0).into());
+        }
+    }
+    
+    Ok(())
+}
 
 // Function to get OAuth token (either from file or through auth flow)
 pub async fn get_oauth_token() -> std::result::Result<TokenInfo, Box<dyn std::error::Error>> {
@@ -36,17 +73,48 @@ pub async fn get_oauth_token() -> std::result::Result<TokenInfo, Box<dyn std::er
             return Ok(token_info);
         }
         
-        // If token is expired, try to refresh it
+        // If token is expired, try to refresh it with retry logic
         info!("Token expired, refreshing...");
-        match refresh_token(&token_info.refresh_token).await {
-            Ok(new_token) => return Ok(new_token),
-            Err(e) => warn!("Failed to refresh token: {}, starting new auth flow", e),
+        let mut retry_count = 0;
+        loop {
+            match refresh_token(&token_info.refresh_token).await {
+                Ok(new_token) => return Ok(new_token),
+                Err(e) => {
+                    // Check if this is a network error that we can retry
+                    if retry_count >= MAX_RETRIES {
+                        warn!("Failed to refresh token after {} retries: {}, starting new auth flow", MAX_RETRIES, e);
+                        break;
+                    }
+                    
+                    retry_count += 1;
+                    warn!("Network error while refreshing token (attempt {}/{}): {}",
+                          retry_count, MAX_RETRIES, e);
+                    info!("Retrying in {} seconds...", RETRY_DELAY);
+                    tokio::time::sleep(Duration::from_secs(RETRY_DELAY)).await;
+                }
+            }
         }
     }
     
-    // If no valid token exists, start OAuth flow
+    // If no valid token exists or refresh failed, start OAuth flow with retry logic
     info!("Starting OAuth authentication flow...");
-    let token_info = oauth_flow().await?;
+    let mut retry_count = 0;
+    let token_info = loop {
+        match oauth_flow().await {
+            Ok(token) => break token,
+            Err(e) => {
+                retry_count += 1;
+                if retry_count >= MAX_RETRIES {
+                    return Err(format!("Failed to complete OAuth flow after {} retries: {}", MAX_RETRIES, e).into());
+                }
+                
+                warn!("Error during OAuth flow (attempt {}/{}): {}",
+                      retry_count, MAX_RETRIES, e);
+                info!("Retrying in {} seconds...", RETRY_DELAY);
+                tokio::time::sleep(Duration::from_secs(RETRY_DELAY)).await;
+            }
+        }
+    };
     
     // Save token to file
     save_token(&token_info)?;
@@ -129,14 +197,25 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
         .set_pkce_challenge(pkce_challenge)
         .url();
     
-    info!("Open this URL in your browser to authorize the application:");
-    info!("{}", auth_url);
+    info!("Opening authorization URL in browser...");
+    
+    // Open the URL in the default browser
+    if let Err(e) = open_url_in_browser(auth_url.as_str()) {
+        warn!("Failed to open URL in browser: {}", e);
+        // Fallback to displaying the URL if we can't open the browser
+        info!("Please open this URL in your browser to authorize the application:");
+        info!("{}", auth_url);
+    }
+    
+    // Create a channel to signal when the authorization code is received
+    let (tx, rx) = oneshot::channel::<()>();
     
     // Create a shared state for the callback server
     let state = Arc::new(Mutex::new(OAuthState {
         auth_code: None,
         csrf_state: csrf_state.secret().clone(),
         pkce_verifier: Some(pkce_verifier),
+        auth_code_received_tx: Some(tx),
     }));
     
     // Start the HTTP server for the OAuth callback
@@ -155,26 +234,18 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
     let addr = ([127, 0, 0, 1], 8080).into();
     let server = Server::bind(&addr).serve(make_service);
     
-    // Clone the state for use in the async block
-    let state_for_server = state.clone();
-    
     // Run the server with a timeout
     debug!("Waiting for authorization callback (timeout: 2 minutes)...");
     let server_with_timeout = async move {
         let server_future = server.with_graceful_shutdown(async {
-            // Wait for the auth code to be received
-            for i in 0..120 {  // Wait up to 2 minutes
-                {
-                    let state_guard = state_for_server.lock().unwrap();
-                    if state_guard.auth_code.is_some() {
-                        debug!("Authorization code received");
-                        break;
-                    }
+            // Wait for the auth code to be received or timeout after 2 minutes
+            tokio::select! {
+                _ = rx => {
+                    debug!("Authorization code received, shutting down server");
                 }
-                if i % 30 == 0 && i > 0 {
-                    debug!("Still waiting for authorization... ({} seconds elapsed)", i);
+                _ = tokio::time::sleep(Duration::from_secs(120)) => {
+                    warn!("Timeout waiting for authorization (2 minutes elapsed)");
                 }
-                tokio::time::sleep(Duration::from_secs(1)).await;
             }
         });
         
@@ -190,7 +261,7 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
         state_guard.auth_code.clone().ok_or("No authorization code received")?
     };
     
-    // Take the PKCE verifier from the state
+    // Get the PKCE verifier from the state
     let pkce_verifier = {
         let mut state_guard = state.lock().unwrap();
         state_guard.pkce_verifier.take().ok_or("PKCE verifier not found")?
@@ -241,10 +312,16 @@ pub async fn handle_oauth_callback(
         };
         
         if received_state == &expected_state {
-            // Store the authorization code
+            // Store the authorization code and signal that it's been received
             {
                 let mut state_guard = state.lock().unwrap();
                 state_guard.auth_code = Some(code.clone());
+                
+                // Send signal through the channel if it exists
+                if let Some(tx) = state_guard.auth_code_received_tx.take() {
+                    let _ = tx.send(());
+                    debug!("Sent signal that authorization code was received");
+                }
             }
             
             *response.body_mut() = Body::from(
@@ -276,12 +353,30 @@ pub async fn refresh_token(refresh_token: &str) -> std::result::Result<TokenInfo
         Some(TokenUrl::new(secrets.installed.token_uri)?),
     );
     
-    // Exchange the refresh token for a new access token
+    // Exchange the refresh token for a new access token with retry logic
     info!("Exchanging refresh token for new access token...");
-    let token_result = client
-        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
-        .request_async(oauth2::reqwest::async_http_client)
-        .await?;
+    
+    let mut retry_count = 0;
+    let token_result = loop {
+        match client
+            .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))
+            .request_async(oauth2::reqwest::async_http_client)
+            .await
+        {
+            Ok(token) => break token,
+            Err(e) => {
+                retry_count += 1;
+                if retry_count >= MAX_RETRIES {
+                    return Err(format!("Failed to refresh token after {} retries: {}", MAX_RETRIES, e).into());
+                }
+                
+                warn!("Network error while refreshing token (attempt {}/{}): {}",
+                      retry_count, MAX_RETRIES, e);
+                info!("Retrying in {} seconds...", RETRY_DELAY);
+                tokio::time::sleep(Duration::from_secs(RETRY_DELAY)).await;
+            }
+        }
+    };
     
     // Create token info
     let token_info = TokenInfo {
