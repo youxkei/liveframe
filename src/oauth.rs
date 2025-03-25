@@ -10,12 +10,12 @@ use dirs::home_dir;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server, StatusCode};
 use log::{debug, error, info, warn};
-use tokio::sync::oneshot;
-use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge,
-    RedirectUrl, RefreshToken, Scope, TokenResponse, TokenUrl,
-};
 use oauth2::basic::BasicClient;
+use oauth2::{
+    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
+    RefreshToken, Scope, TokenResponse, TokenUrl,
+};
+use tokio::sync::oneshot;
 use windows::core::*;
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::SW_SHOW;
@@ -27,13 +27,48 @@ const MAX_RETRIES: u32 = 3;
 // Delay between retries in seconds
 const RETRY_DELAY: u64 = 5;
 
+// Generic retry function for async operations
+pub async fn retry_async<T, F, Fut, E>(
+    operation_name: &str,
+    f: F,
+) -> std::result::Result<T, Box<dyn std::error::Error>>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+    E: std::fmt::Display + 'static,
+{
+    let mut retry_count = 0;
+    loop {
+        match f().await {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                retry_count += 1;
+                if retry_count >= MAX_RETRIES {
+                    return Err(format!(
+                        "Failed to {} after {} retries: {}",
+                        operation_name, MAX_RETRIES, e
+                    )
+                    .into());
+                }
+
+                warn!(
+                    "Error during {} (attempt {}/{}): {}",
+                    operation_name, retry_count, MAX_RETRIES, e
+                );
+                info!("Retrying in {} seconds...", RETRY_DELAY);
+                tokio::time::sleep(Duration::from_secs(RETRY_DELAY)).await;
+            }
+        }
+    }
+}
+
 // Function to open a URL in the default browser
 pub fn open_url_in_browser(url: &str) -> std::result::Result<(), Box<dyn std::error::Error>> {
     info!("Opening URL in browser: {}", url);
-    
+
     // Convert the URL to a wide string for Windows API
     let url_wide: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
-    
+
     unsafe {
         // Use ShellExecuteW to open the URL in the default browser
         let result = ShellExecuteW(
@@ -44,14 +79,14 @@ pub fn open_url_in_browser(url: &str) -> std::result::Result<(), Box<dyn std::er
             PCWSTR::null(),
             SW_SHOW,
         );
-        
+
         // Check if the operation was successful
         if result.0 <= 32 {
             error!("Failed to open URL in browser, error code: {}", result.0);
             return Err(format!("Failed to open URL in browser, error code: {}", result.0).into());
         }
     }
-    
+
     Ok(())
 }
 
@@ -64,62 +99,33 @@ pub async fn get_oauth_token() -> std::result::Result<TokenInfo, Box<dyn std::er
         let mut file = File::open(&token_path)?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)?;
-        
+
         let token_info: TokenInfo = serde_json::from_str(&contents)?;
-        
+
         // If token is not expired, return it
         if Utc::now() < token_info.expiry {
             debug!("Token is still valid, using existing token");
             return Ok(token_info);
         }
-        
+
         // If token is expired, try to refresh it with retry logic
         info!("Token expired, refreshing...");
-        let mut retry_count = 0;
-        loop {
-            match refresh_token(&token_info.refresh_token).await {
-                Ok(new_token) => return Ok(new_token),
-                Err(e) => {
-                    // Check if this is a network error that we can retry
-                    if retry_count >= MAX_RETRIES {
-                        warn!("Failed to refresh token after {} retries: {}, starting new auth flow", MAX_RETRIES, e);
-                        break;
-                    }
-                    
-                    retry_count += 1;
-                    warn!("Network error while refreshing token (attempt {}/{}): {}",
-                          retry_count, MAX_RETRIES, e);
-                    info!("Retrying in {} seconds...", RETRY_DELAY);
-                    tokio::time::sleep(Duration::from_secs(RETRY_DELAY)).await;
-                }
+        match retry_async("refresh token", || refresh_token(&token_info.refresh_token)).await {
+            Ok(new_token) => return Ok(new_token),
+            Err(e) => {
+                warn!("Failed to refresh token: {}, starting new auth flow", e);
             }
         }
     }
-    
+
     // If no valid token exists or refresh failed, start OAuth flow with retry logic
     info!("Starting OAuth authentication flow...");
-    let mut retry_count = 0;
-    let token_info = loop {
-        match oauth_flow().await {
-            Ok(token) => break token,
-            Err(e) => {
-                retry_count += 1;
-                if retry_count >= MAX_RETRIES {
-                    return Err(format!("Failed to complete OAuth flow after {} retries: {}", MAX_RETRIES, e).into());
-                }
-                
-                warn!("Error during OAuth flow (attempt {}/{}): {}",
-                      retry_count, MAX_RETRIES, e);
-                info!("Retrying in {} seconds...", RETRY_DELAY);
-                tokio::time::sleep(Duration::from_secs(RETRY_DELAY)).await;
-            }
-        }
-    };
-    
+    let token_info = retry_async("complete OAuth flow", || oauth_flow()).await?;
+
     // Save token to file
     save_token(&token_info)?;
     debug!("Token saved to file");
-    
+
     Ok(token_info)
 }
 
@@ -127,12 +133,12 @@ pub async fn get_oauth_token() -> std::result::Result<TokenInfo, Box<dyn std::er
 pub fn get_token_path() -> std::result::Result<PathBuf, Box<dyn std::error::Error>> {
     let mut path = home_dir().ok_or("Could not find home directory")?;
     path.push(".liveframe");
-    
+
     // Create directory if it doesn't exist
     if !path.exists() {
         fs::create_dir_all(&path)?;
     }
-    
+
     path.push("token.json");
     Ok(path)
 }
@@ -142,11 +148,11 @@ pub fn get_secrets_path() -> std::result::Result<PathBuf, Box<dyn std::error::Er
     let mut path = home_dir().ok_or("Could not find home directory")?;
     path.push(".liveframe");
     path.push("secret.json");
-    
+
     if !path.exists() {
         return Err("Client secrets file not found at ~/.liveframe/secret.json".into());
     }
-    
+
     Ok(path)
 }
 
@@ -165,7 +171,7 @@ pub fn load_client_secrets() -> std::result::Result<ClientSecrets, Box<dyn std::
     let mut file = File::open(secrets_path)?;
     let mut contents = String::new();
     file.read_to_string(&mut contents)?;
-    
+
     let secrets: ClientSecrets = serde_json::from_str(&contents)?;
     Ok(secrets)
 }
@@ -175,7 +181,7 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
     // Load client secrets
     info!("Loading client secrets...");
     let secrets = load_client_secrets()?;
-    
+
     // Create OAuth client
     debug!("Creating OAuth client...");
     let client = BasicClient::new(
@@ -185,20 +191,22 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
         Some(TokenUrl::new(secrets.installed.token_uri)?),
     )
     .set_redirect_uri(RedirectUrl::new("http://localhost:8080".to_string())?);
-    
+
     // Generate PKCE challenge
     debug!("Generating PKCE challenge...");
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    
+
     // Generate the authorization URL
     let (auth_url, csrf_state) = client
         .authorize_url(CsrfToken::new_random)
-        .add_scope(Scope::new("https://www.googleapis.com/auth/youtube.readonly".to_string()))
+        .add_scope(Scope::new(
+            "https://www.googleapis.com/auth/youtube.readonly".to_string(),
+        ))
         .set_pkce_challenge(pkce_challenge)
         .url();
-    
+
     info!("Opening authorization URL in browser...");
-    
+
     // Open the URL in the default browser
     if let Err(e) = open_url_in_browser(auth_url.as_str()) {
         warn!("Failed to open URL in browser: {}", e);
@@ -206,10 +214,10 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
         info!("Please open this URL in your browser to authorize the application:");
         info!("{}", auth_url);
     }
-    
+
     // Create a channel to signal when the authorization code is received
     let (tx, rx) = oneshot::channel::<()>();
-    
+
     // Create a shared state for the callback server
     let state = Arc::new(Mutex::new(OAuthState {
         auth_code: None,
@@ -217,7 +225,7 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
         pkce_verifier: Some(pkce_verifier),
         auth_code_received_tx: Some(tx),
     }));
-    
+
     // Start the HTTP server for the OAuth callback
     info!("Starting OAuth callback server on http://localhost:8080");
     let state_clone = state.clone();
@@ -230,10 +238,10 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
             }))
         }
     });
-    
+
     let addr = ([127, 0, 0, 1], 8080).into();
     let server = Server::bind(&addr).serve(make_service);
-    
+
     // Run the server with a timeout
     debug!("Waiting for authorization callback (timeout: 2 minutes)...");
     let server_with_timeout = async move {
@@ -248,25 +256,31 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
                 }
             }
         });
-        
+
         server_future.await
     };
-    
+
     // Run the server and wait for it to complete
     server_with_timeout.await?;
-    
+
     // Get the authorization code from the state
     let auth_code = {
         let state_guard = state.lock().unwrap();
-        state_guard.auth_code.clone().ok_or("No authorization code received")?
+        state_guard
+            .auth_code
+            .clone()
+            .ok_or("No authorization code received")?
     };
-    
+
     // Get the PKCE verifier from the state
     let pkce_verifier = {
         let mut state_guard = state.lock().unwrap();
-        state_guard.pkce_verifier.take().ok_or("PKCE verifier not found")?
+        state_guard
+            .pkce_verifier
+            .take()
+            .ok_or("PKCE verifier not found")?
     };
-    
+
     // Exchange the authorization code for an access token
     info!("Exchanging authorization code for access token...");
     let token_result = client
@@ -274,18 +288,22 @@ pub async fn oauth_flow() -> std::result::Result<TokenInfo, Box<dyn std::error::
         .set_pkce_verifier(pkce_verifier)
         .request_async(oauth2::reqwest::async_http_client)
         .await?;
-    
+
     // Create token info
     debug!("Creating token info with expiry time");
     let token_info = TokenInfo {
         access_token: token_result.access_token().secret().clone(),
-        refresh_token: token_result.refresh_token()
+        refresh_token: token_result
+            .refresh_token()
             .ok_or("No refresh token received")?
             .secret()
             .clone(),
-        expiry: Utc::now() + chrono::Duration::seconds(token_result.expires_in().unwrap_or_default().as_secs() as i64),
+        expiry: Utc::now()
+            + chrono::Duration::seconds(
+                token_result.expires_in().unwrap_or_default().as_secs() as i64
+            ),
     };
-    
+
     info!("OAuth flow completed successfully");
     Ok(token_info)
 }
@@ -297,33 +315,33 @@ pub async fn handle_oauth_callback(
 ) -> std::result::Result<Response<Body>, hyper::Error> {
     let uri = req.uri();
     let query = uri.query().unwrap_or("");
-    
+
     let params: HashMap<_, _> = url::form_urlencoded::parse(query.as_bytes())
         .into_owned()
         .collect();
-    
+
     let mut response = Response::new(Body::empty());
-    
+
     if let (Some(code), Some(received_state)) = (params.get("code"), params.get("state")) {
         // Verify CSRF state
         let expected_state = {
             let state_guard = state.lock().unwrap();
             state_guard.csrf_state.clone()
         };
-        
+
         if received_state == &expected_state {
             // Store the authorization code and signal that it's been received
             {
                 let mut state_guard = state.lock().unwrap();
                 state_guard.auth_code = Some(code.clone());
-                
+
                 // Send signal through the channel if it exists
                 if let Some(tx) = state_guard.auth_code_received_tx.take() {
                     let _ = tx.send(());
                     debug!("Sent signal that authorization code was received");
                 }
             }
-            
+
             *response.body_mut() = Body::from(
                 "Authorization successful! You can close this window and return to the application.",
             );
@@ -335,16 +353,18 @@ pub async fn handle_oauth_callback(
         *response.status_mut() = StatusCode::BAD_REQUEST;
         *response.body_mut() = Body::from("Missing code or state parameter");
     }
-    
+
     Ok(response)
 }
 
 // Function to refresh OAuth token
-pub async fn refresh_token(refresh_token: &str) -> std::result::Result<TokenInfo, Box<dyn std::error::Error>> {
+pub async fn refresh_token(
+    refresh_token: &str,
+) -> std::result::Result<TokenInfo, Box<dyn std::error::Error>> {
     // Load client secrets
     debug!("Loading client secrets for token refresh...");
     let secrets = load_client_secrets()?;
-    
+
     // Create OAuth client
     let client = BasicClient::new(
         ClientId::new(secrets.installed.client_id),
@@ -352,10 +372,11 @@ pub async fn refresh_token(refresh_token: &str) -> std::result::Result<TokenInfo
         AuthUrl::new(secrets.installed.auth_uri)?,
         Some(TokenUrl::new(secrets.installed.token_uri)?),
     );
-    
+
     // Exchange the refresh token for a new access token with retry logic
     info!("Exchanging refresh token for new access token...");
-    
+
+    // リトライロジックを直接実装
     let mut retry_count = 0;
     let token_result = loop {
         match client
@@ -367,30 +388,39 @@ pub async fn refresh_token(refresh_token: &str) -> std::result::Result<TokenInfo
             Err(e) => {
                 retry_count += 1;
                 if retry_count >= MAX_RETRIES {
-                    return Err(format!("Failed to refresh token after {} retries: {}", MAX_RETRIES, e).into());
+                    return Err(format!(
+                        "Failed to exchange refresh token after {} retries: {}",
+                        MAX_RETRIES, e
+                    )
+                    .into());
                 }
-                
-                warn!("Network error while refreshing token (attempt {}/{}): {}",
-                      retry_count, MAX_RETRIES, e);
-                info!("Retrying in {} seconds...", RETRY_DELAY);
+                warn!(
+                    "Error during token refresh (attempt {}/{}): {}",
+                    retry_count, MAX_RETRIES, e
+                );
                 tokio::time::sleep(Duration::from_secs(RETRY_DELAY)).await;
             }
         }
     };
-    
+
     // Create token info
     let token_info = TokenInfo {
         access_token: token_result.access_token().secret().clone(),
-        refresh_token: token_result.refresh_token()
+        refresh_token: token_result
+            .refresh_token()
             .map(|rt| rt.secret().clone())
             .unwrap_or_else(|| refresh_token.to_string()),
-        expiry: Utc::now() + chrono::Duration::seconds(token_result.expires_in().unwrap_or_default().as_secs() as i64),
+        expiry: Utc::now()
+            + chrono::Duration::seconds(
+                token_result.expires_in().unwrap_or_default().as_secs() as i64
+            ),
     };
-    
+
     // Save the new token
     debug!("Saving refreshed token to file...");
     save_token(&token_info)?;
     info!("Token refreshed successfully");
-    
+
     Ok(token_info)
 }
+
