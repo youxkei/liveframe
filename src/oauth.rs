@@ -10,7 +10,7 @@ use dirs::home_dir;
 use hyper::service::{make_service_fn, service_fn};
 use hyper::{Body, Request, Response, Server, StatusCode};
 use log::{debug, error, info, warn};
-use oauth2::basic::BasicClient;
+use oauth2::basic::{BasicClient, BasicErrorResponseType};
 use oauth2::{
     AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, PkceCodeChallenge, RedirectUrl,
     RefreshToken, Scope, TokenResponse, TokenUrl,
@@ -110,7 +110,7 @@ pub async fn get_oauth_token() -> std::result::Result<TokenInfo, Box<dyn std::er
 
         // If token is expired, try to refresh it with retry logic
         info!("Token expired, refreshing...");
-        match retry_async("refresh token", || refresh_token(&token_info.refresh_token)).await {
+        match refresh_token(&token_info.refresh_token).await {
             Ok(new_token) => return Ok(new_token),
             Err(e) => {
                 warn!("Failed to refresh token: {}, starting new auth flow", e);
@@ -386,16 +386,22 @@ pub async fn refresh_token(
         {
             Ok(token) => break token,
             Err(e) => {
+                if let oauth2::RequestTokenError::ServerResponse(e) = &e {
+                    if e.error() == &BasicErrorResponseType::InvalidGrant {
+                        return Err("Refresh token expired".into());
+                    }
+                }
+
                 retry_count += 1;
                 if retry_count >= MAX_RETRIES {
                     return Err(format!(
-                        "Failed to exchange refresh token after {} retries: {}",
+                        "Failed to exchange refresh token after {} retries: {:?}",
                         MAX_RETRIES, e
                     )
                     .into());
                 }
                 warn!(
-                    "Error during token refresh (attempt {}/{}): {}",
+                    "Error during token refresh (attempt {}/{}): {:?}",
                     retry_count, MAX_RETRIES, e
                 );
                 tokio::time::sleep(Duration::from_secs(RETRY_DELAY)).await;
@@ -423,4 +429,3 @@ pub async fn refresh_token(
 
     Ok(token_info)
 }
-

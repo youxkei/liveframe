@@ -34,7 +34,8 @@ async fn main() -> windows::core::Result<()> {
     let (tx, rx) = mpsc::channel();
 
     // Spawn a thread to create the window and run the message loop
-    let _window_thread = thread::spawn(move || unsafe { window::create_window_and_run_message_loop(tx) });
+    let _window_thread =
+        thread::spawn(move || unsafe { window::create_window_and_run_message_loop(tx) });
 
     // Wait to receive the window handle from the window thread
     let hwnd = match rx.recv() {
@@ -89,11 +90,11 @@ async fn main() -> windows::core::Result<()> {
         match youtube::check_youtube_streaming(&token.access_token).await {
             Ok(streaming) => {
                 debug!("Current streaming status: {}", streaming);
-                
+
                 if streaming != is_streaming {
                     is_streaming = streaming;
                     info!("Streaming status changed to: {}", is_streaming);
-                    
+
                     // Update window visibility based on streaming status
                     unsafe {
                         window::set_window_visibility(hwnd, is_streaming);
