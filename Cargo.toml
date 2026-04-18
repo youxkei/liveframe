@@ -1,6 +1,6 @@
 [package]
 name = "liveframe"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
@@ -27,3 +27,13 @@ dirs = "5.0"
 chrono = "0.4"
 log = "0.4"
 env_logger = "0.10"
+yt-dlp = { version = "2.7.2", features = ["live-streaming"] }
+ebur128 = "0.1"
+tokio-util = "0.7"
+anyhow = "1"
+
+# yt-dlp pins lofty 0.23.2, but all 0.23.x patch releases on crates.io are yanked
+# (RUSTSEC-2024-0436 — `paste` crate). yt-dlp itself patches to a fork; we must do
+# the same from the workspace root because nested [patch] sections are ignored.
+[patch.crates-io]
+lofty = { git = "https://github.com/boul2gom/lofty-rs", rev = "d2e41640481a48a95303d95939ba831767afcec8" }

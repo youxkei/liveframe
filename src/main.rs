@@ -1,3 +1,4 @@
+mod audio;
 mod models;
 mod oauth;
 mod window;
@@ -10,6 +11,9 @@ use std::time::Duration;
 use chrono::Utc;
 use env_logger::Builder;
 use log::{debug, error, info};
+use tokio_util::sync::CancellationToken;
+
+use crate::audio::SendHwnd;
 
 #[tokio::main]
 async fn main() -> windows::core::Result<()> {
@@ -28,7 +32,7 @@ async fn main() -> windows::core::Result<()> {
         .filter(None, log::LevelFilter::Info)
         .init();
 
-    info!("Application starting...");
+    info!("liveframe v{} starting...", env!("CARGO_PKG_VERSION"));
 
     // Create a channel for sending the window handle from the window thread to the main thread
     let (tx, rx) = mpsc::channel();
@@ -71,8 +75,10 @@ async fn main() -> windows::core::Result<()> {
     };
 
     // Main loop to check YouTube streaming status
-    let mut is_streaming = false;
+    let mut current_video_id: Option<String> = None;
+    let mut audio_task: Option<(CancellationToken, tokio::task::JoinHandle<()>)> = None;
     let mut token = token_info;
+    let send_hwnd = SendHwnd(hwnd);
 
     loop {
         // Check if token needs refresh
@@ -88,23 +94,49 @@ async fn main() -> windows::core::Result<()> {
         // Check YouTube streaming status
         debug!("Check streaming status...");
         match youtube::check_youtube_streaming(&token.access_token).await {
-            Ok(streaming) => {
-                debug!("Current streaming status: {}", streaming);
+            Ok(new_video_id) => {
+                if new_video_id != current_video_id {
+                    info!(
+                        "Streaming state changed: {:?} -> {:?}",
+                        current_video_id, new_video_id
+                    );
 
-                if streaming != is_streaming {
-                    is_streaming = streaming;
-                    info!("Streaming status changed to: {}", is_streaming);
-
-                    // Update window visibility based on streaming status
-                    unsafe {
-                        window::set_window_visibility(hwnd, is_streaming);
+                    // Stop any existing audio task.
+                    if let Some((cancel, handle)) = audio_task.take() {
+                        cancel.cancel();
+                        let _ = handle.await;
                     }
+                    // Reset color state for the next session.
+                    window::set_color_state(hwnd, window::COLOR_UNKNOWN);
+
+                    match &new_video_id {
+                        Some(id) => {
+                            unsafe { window::set_window_visibility(hwnd, true); }
+                            let cancel = CancellationToken::new();
+                            let cancel_task = cancel.clone();
+                            let id_clone = id.clone();
+                            let hwnd_clone = send_hwnd;
+                            let handle = tokio::spawn(async move {
+                                if let Err(e) =
+                                    audio::run_audio_task(id_clone, hwnd_clone, cancel_task).await
+                                {
+                                    error!("audio task failed: {:#}", e);
+                                }
+                            });
+                            audio_task = Some((cancel, handle));
+                        }
+                        None => {
+                            unsafe { window::set_window_visibility(hwnd, false); }
+                        }
+                    }
+
+                    current_video_id = new_video_id;
                 }
             }
             Err(e) => error!("Failed to check streaming status: {}", e),
         }
 
         // Sleep for 5 seconds before checking again
-        thread::sleep(Duration::from_secs(5));
+        tokio::time::sleep(Duration::from_secs(5)).await;
     }
 }

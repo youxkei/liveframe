@@ -1,14 +1,33 @@
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc;
 use log::{debug, error, info};
 use windows::{
     core::*,
     Win32::Foundation::*,
     Win32::Graphics::Gdi::{
-        BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, PAINTSTRUCT,
+        BeginPaint, CreateSolidBrush, DeleteObject, EndPaint, FillRect, InvalidateRect, PAINTSTRUCT,
     },
     Win32::System::LibraryLoader::GetModuleHandleW,
     Win32::UI::WindowsAndMessaging::*,
 };
+
+// Frame color state, read by wndproc in the window thread and written by the audio task.
+// 0 = unknown (defaults to red), 1 = red (silent), 2 = green (audible).
+pub const COLOR_UNKNOWN: u8 = 0;
+pub const COLOR_RED: u8 = 1;
+pub const COLOR_GREEN: u8 = 2;
+
+static COLOR_STATE: AtomicU8 = AtomicU8::new(COLOR_UNKNOWN);
+
+// Updates the color state. If the category changed, invalidates the window so wndproc repaints.
+pub fn set_color_state(hwnd: HWND, new_state: u8) {
+    let prev = COLOR_STATE.swap(new_state, Ordering::Relaxed);
+    if prev != new_state && hwnd.0 != 0 {
+        unsafe {
+            InvalidateRect(hwnd, None, TRUE);
+        }
+    }
+}
 
 // Function to create window and run message loop in a separate thread
 pub unsafe fn create_window_and_run_message_loop(tx: mpsc::Sender<HWND>) -> Result<()> {
@@ -91,51 +110,48 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
                 let mut rect = RECT::default();
                 GetClientRect(hwnd, &mut rect);
 
-                // Create a red brush for the frame
-                let red_brush = CreateSolidBrush(COLORREF(0x0000FF)); // RGB format is 0x00BBGGRR
+                // COLORREF is 0x00BBGGRR. Green when audio is audible, red otherwise.
+                let color = match COLOR_STATE.load(Ordering::Relaxed) {
+                    COLOR_GREEN => COLORREF(0x00FF00),
+                    _ => COLORREF(0x0000FF),
+                };
+                let brush = CreateSolidBrush(color);
 
-                // Frame thickness (3 pixels)
                 let frame_thickness = 3;
 
-                // Draw the frame exactly at the edges of the screen
-                // Top frame
                 let top_rect = RECT {
                     left: 0,
                     top: 0,
                     right: rect.right,
                     bottom: frame_thickness,
                 };
-                FillRect(hdc, &top_rect, red_brush);
+                FillRect(hdc, &top_rect, brush);
 
-                // Bottom frame
                 let bottom_rect = RECT {
                     left: 0,
                     top: rect.bottom - frame_thickness,
                     right: rect.right,
                     bottom: rect.bottom,
                 };
-                FillRect(hdc, &bottom_rect, red_brush);
+                FillRect(hdc, &bottom_rect, brush);
 
-                // Left frame
                 let left_rect = RECT {
                     left: 0,
                     top: 0,
                     right: frame_thickness,
                     bottom: rect.bottom,
                 };
-                FillRect(hdc, &left_rect, red_brush);
+                FillRect(hdc, &left_rect, brush);
 
-                // Right frame
                 let right_rect = RECT {
                     left: rect.right - frame_thickness,
                     top: 0,
                     right: rect.right,
                     bottom: rect.bottom,
                 };
-                FillRect(hdc, &right_rect, red_brush);
+                FillRect(hdc, &right_rect, brush);
 
-                // Clean up
-                DeleteObject(red_brush);
+                DeleteObject(brush);
 
                 EndPaint(hwnd, &ps);
                 LRESULT(0)
