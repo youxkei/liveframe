@@ -50,11 +50,12 @@ async fn main() -> windows::core::Result<()> {
         }
     };
 
-    // Initially hide the window until we check streaming status
+    // Show a white frame until an active stream is detected.
     unsafe {
         if hwnd.0 != 0 {
-            window::set_window_visibility(hwnd, false);
-            debug!("Window initially hidden");
+            window::set_color_state(hwnd, window::COLOR_WHITE);
+            window::set_window_visibility(hwnd, true);
+            debug!("Window initially shown as idle");
         }
     }
 
@@ -111,7 +112,9 @@ async fn main() -> windows::core::Result<()> {
 
                     match &new_video_id {
                         Some(id) => {
-                            unsafe { window::set_window_visibility(hwnd, true); }
+                            unsafe {
+                                window::set_window_visibility(hwnd, true);
+                            }
                             let cancel = CancellationToken::new();
                             let cancel_task = cancel.clone();
                             let id_clone = id.clone();
@@ -126,7 +129,10 @@ async fn main() -> windows::core::Result<()> {
                             audio_task = Some((cancel, handle));
                         }
                         None => {
-                            unsafe { window::set_window_visibility(hwnd, false); }
+                            window::set_color_state(hwnd, window::COLOR_WHITE);
+                            unsafe {
+                                window::set_window_visibility(hwnd, true);
+                            }
                         }
                     }
 

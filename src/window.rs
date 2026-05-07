@@ -1,6 +1,6 @@
+use log::{debug, error, info};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::mpsc;
-use log::{debug, error, info};
 use windows::{
     core::*,
     Win32::Foundation::*,
@@ -11,11 +11,12 @@ use windows::{
     Win32::UI::WindowsAndMessaging::*,
 };
 
-// Frame color state, read by wndproc in the window thread and written by the audio task.
-// 0 = unknown (defaults to red), 1 = red (silent), 2 = green (audible).
+// Frame color state, read by wndproc in the window thread and written by other tasks.
+// 0 = unknown (defaults to red), 1 = red (silent), 2 = green (audible), 3 = white (idle).
 pub const COLOR_UNKNOWN: u8 = 0;
 pub const COLOR_RED: u8 = 1;
 pub const COLOR_GREEN: u8 = 2;
+pub const COLOR_WHITE: u8 = 3;
 
 static COLOR_STATE: AtomicU8 = AtomicU8::new(COLOR_UNKNOWN);
 
@@ -54,7 +55,7 @@ pub unsafe fn create_window_and_run_message_loop(tx: mpsc::Sender<HWND>) -> Resu
     debug!("Screen dimensions: {}x{}", screen_width, screen_height);
 
     // Create the window with the specified styles
-    info!("Creating window with red frame...");
+    info!("Creating frame window...");
     let hwnd = CreateWindowExW(
         WS_EX_TOOLWINDOW | WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
         window_class,
@@ -81,7 +82,7 @@ pub unsafe fn create_window_and_run_message_loop(tx: mpsc::Sender<HWND>) -> Resu
         return Err(Error::from_win32());
     }
 
-    // Set the window to be transparent except for the red frame
+    // Set the window to be transparent except for the frame
     debug!("Setting window transparency...");
     let color_key = COLORREF(0); // Black is transparent
                                  // Use the full path for SetLayeredWindowAttributes
@@ -110,9 +111,10 @@ extern "system" fn wndproc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPA
                 let mut rect = RECT::default();
                 GetClientRect(hwnd, &mut rect);
 
-                // COLORREF is 0x00BBGGRR. Green when audio is audible, red otherwise.
+                // COLORREF is 0x00BBGGRR. Green when audio is audible, white when idle, red otherwise.
                 let color = match COLOR_STATE.load(Ordering::Relaxed) {
                     COLOR_GREEN => COLORREF(0x00FF00),
+                    COLOR_WHITE => COLORREF(0xFFFFFF),
                     _ => COLORREF(0x0000FF),
                 };
                 let brush = CreateSolidBrush(color);
@@ -170,10 +172,10 @@ pub unsafe fn set_window_visibility(hwnd: HWND, visible: bool) {
     if hwnd.0 != 0 {
         if visible {
             ShowWindow(hwnd, SW_SHOW);
-            info!("Window shown (streaming active)");
+            info!("Window shown");
         } else {
             ShowWindow(hwnd, SW_HIDE);
-            info!("Window hidden (not streaming)");
+            info!("Window hidden");
         }
     }
 }

@@ -9,8 +9,8 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio_util::sync::CancellationToken;
 use windows::Win32::Foundation::HWND;
-use yt_dlp::Downloader;
 use yt_dlp::client::deps::Libraries;
+use yt_dlp::Downloader;
 
 use crate::window::{set_color_state, COLOR_GREEN, COLOR_RED};
 
@@ -55,13 +55,19 @@ pub async fn run_audio_task(
     let yt_dlp_path = libs.join(format!("yt-dlp{}", exe));
     let ffmpeg_path_expected = libs.join(format!("ffmpeg{}", exe));
 
-    info!("Installing yt-dlp/ffmpeg binaries into {:?} (first run only)", libs);
+    info!(
+        "Installing yt-dlp/ffmpeg binaries into {:?} (first run only)",
+        libs
+    );
     let libraries = Libraries::new(yt_dlp_path, ffmpeg_path_expected)
         .install_dependencies()
         .await
         .context("failed to install yt-dlp/ffmpeg")?;
     let ffmpeg_path = libraries.ffmpeg.clone();
-    info!("yt-dlp: {:?} / ffmpeg: {:?}", libraries.youtube, ffmpeg_path);
+    info!(
+        "yt-dlp: {:?} / ffmpeg: {:?}",
+        libraries.youtube, ffmpeg_path
+    );
 
     let downloader = Downloader::builder(libraries, libs.join("output"))
         .build()
@@ -80,20 +86,29 @@ pub async fn run_audio_task(
     }
 
     let hls_url = pick_hls_url(&video)?;
-    info!("Using HLS URL (truncated): {}...", &hls_url[..hls_url.len().min(80)]);
+    info!(
+        "Using HLS URL (truncated): {}...",
+        &hls_url[..hls_url.len().min(80)]
+    );
 
     info!("Launching ffmpeg: {:?}", ffmpeg_path);
 
     let mut child = Command::new(&ffmpeg_path)
         .args([
-            "-loglevel", "error",
+            "-loglevel",
+            "error",
             "-nostdin",
-            "-i", &hls_url,
+            "-i",
+            &hls_url,
             "-vn",
-            "-f", "f32le",
-            "-acodec", "pcm_f32le",
-            "-ac", &CHANNELS.to_string(),
-            "-ar", &SAMPLE_RATE.to_string(),
+            "-f",
+            "f32le",
+            "-acodec",
+            "pcm_f32le",
+            "-ac",
+            &CHANNELS.to_string(),
+            "-ar",
+            &SAMPLE_RATE.to_string(),
             "-",
         ])
         .stdin(Stdio::null())
@@ -103,7 +118,10 @@ pub async fn run_audio_task(
         .spawn()
         .context("failed to spawn ffmpeg")?;
 
-    let mut stdout = child.stdout.take().ok_or_else(|| anyhow!("ffmpeg stdout missing"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow!("ffmpeg stdout missing"))?;
     let stderr = child.stderr.take();
     if let Some(mut stderr) = stderr {
         tokio::spawn(async move {
@@ -199,6 +217,8 @@ fn pick_hls_url(video: &yt_dlp::model::Video) -> anyhow::Result<String> {
         .or_else(|| live_formats.first().copied())
         .ok_or_else(|| anyhow!("no suitable live format"))?;
 
-    Ok(chosen.url().map_err(|e| anyhow!("format has no url: {}", e))?.clone())
+    Ok(chosen
+        .url()
+        .map_err(|e| anyhow!("format has no url: {}", e))?
+        .clone())
 }
-

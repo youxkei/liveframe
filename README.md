@@ -1,10 +1,11 @@
 # LiveFrame-RS
 
-A Windows application that displays a red frame around your screen when you are streaming on YouTube.
+A Windows application that displays a frame around your screen based on your YouTube streaming state.
 
 ## Features
 
-- Shows a red frame around your screen only when you're streaming on YouTube
+- Shows a white frame when the app is running and no YouTube stream is active
+- Shows a red or green frame around your screen when you're streaming on YouTube
 - Uses YouTube API to detect active live broadcasts
 - OAuth authentication for secure API access
 - Automatically refreshes authentication tokens
@@ -53,8 +54,8 @@ On first run, the application will:
 
 ## Usage
 
-- When you start streaming on YouTube, the red frame will appear around your screen
-- When you stop streaming, the frame will disappear
+- When the app is running and no stream is active, a white frame appears around your screen
+- When you start streaming on YouTube, the frame changes to red or green based on stream audio
 - The application checks your streaming status every 30 seconds
 
 ## Troubleshooting
